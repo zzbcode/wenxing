@@ -1,0 +1,51 @@
+name: Checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Server behavior tests
+        run: npm test
+      - name: Build client and compatibility artifact
+        run: npm run build
+      - name: Compatibility artifact tests
+        run: npm run test:sites
+      - name: Dependency audit
+        run: npm audit --omit=dev --audit-level=high
+      - name: Privacy guard regression tests
+        run: python3 -m unittest discover -s tests -p 'test_privacy*.py'
+      - name: Repository privacy guard
+        run: python3 scripts/check-public-files.py --history
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate generic Compose configuration
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+      - name: Build self-hosted image
+        run: docker build -t wenxing-ci .
+      - name: Run without secrets and check health
+        run: |
+          docker run -d --name wenxing-ci -p 127.0.0.1:3001:3000 wenxing-ci
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:3001/wenxing/api/health; then exit 0; fi
+            sleep 1
+          done
+          docker logs wenxing-ci
+          exit 1

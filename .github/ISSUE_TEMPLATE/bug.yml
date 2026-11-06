@@ -1,0 +1,28 @@
+name: 问题反馈
+description: 报告可复现的写作或自托管问题，不上传私人作品或凭据。
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 发生了什么
+      description: 预期与实际行为；请用合成内容复现。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 环境与提交版本
+      placeholder: 浏览器、Node/Docker、源码提交
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 隐私确认
+      options:
+        - label: 我已移除 API Key、Cookie、私人稿件和真实账号信息。
+          required: true

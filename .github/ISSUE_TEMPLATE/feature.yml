@@ -1,0 +1,19 @@
+name: 写作场景与建议
+description: 描述真实写作任务、当前阻碍以及你希望怎样改善。
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 你在完成什么写作任务
+    validations:
+      required: true
+  - type: textarea
+    id: obstacle
+    attributes:
+      label: 当前怎样操作，哪里受阻
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: 希望的改进

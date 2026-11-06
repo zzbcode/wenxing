@@ -1,0 +1,17 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+.openai
+node_modules
+data
+backups
+output
+dist
+*.sqlite*
+*.db*
+*.pem
+*.key
+*.log
+docs/screenshots
