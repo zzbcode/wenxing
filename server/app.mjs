@@ -311,20 +311,42 @@ export function createApp(options = {}) {
         req.body.settings.length > 50000)
     )
       throw error(400, "人物与世界设定需为50000字以内的文本");
-    run(
-      "INSERT INTO projects(id,ownerId,title,synopsis,settings,genre,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?,?)",
-      id,
-      req.user.id,
-      title,
-      text(req.body.synopsis, 50000),
-      text(req.body.settings, 50000),
-      text(req.body.genre, 80, "长篇小说"),
-      now,
-      now,
-    );
-    res
-      .status(201)
-      .json({ project: get("SELECT * FROM projects WHERE id=?", id) });
+    const createFirstChapter = req.body.createFirstChapter === true;
+    const firstContent = req.body.firstChapterContent ?? "";
+    if (createFirstChapter && typeof firstContent !== "string")
+      throw error(400, "第一章正文需为文本");
+    if (createFirstChapter && firstContent.length > 2000000)
+      throw error(413, "章节过长，请拆分章节");
+    const chapterId = createFirstChapter ? randomUUID() : null;
+    transaction(db, () => {
+      run(
+        "INSERT INTO projects(id,ownerId,title,synopsis,settings,genre,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?,?)",
+        id,
+        req.user.id,
+        title,
+        text(req.body.synopsis, 50000),
+        text(req.body.settings, 50000),
+        text(req.body.genre, 80, "长篇小说"),
+        now,
+        now,
+      );
+      if (createFirstChapter)
+        run(
+          "INSERT INTO chapters(id,projectId,title,content,revision,sortOrder,createdAt,updatedAt) VALUES(?,?,?,?,1,1,?,?)",
+          chapterId,
+          id,
+          text(req.body.firstChapterTitle, 160) || "第一章",
+          firstContent,
+          now,
+          now,
+        );
+    });
+    res.status(201).json({
+      project: get("SELECT * FROM projects WHERE id=?", id),
+      ...(chapterId
+        ? { chapter: get("SELECT * FROM chapters WHERE id=?", chapterId) }
+        : {}),
+    });
   });
   router.patch("/projects/:id", (req, res) => {
     const row = projectFor(req.user.id, req.params.id);
@@ -426,11 +448,9 @@ export function createApp(options = {}) {
       now,
       now,
     );
-    res
-      .status(201)
-      .json({
-        conversation: get("SELECT * FROM conversations WHERE id=?", id),
-      });
+    res.status(201).json({
+      conversation: get("SELECT * FROM conversations WHERE id=?", id),
+    });
   });
   router.patch("/conversations/:id", (req, res) => {
     const row = conversationFor(req.user.id, req.params.id);
@@ -732,14 +752,12 @@ export function createApp(options = {}) {
         if (!res.destroyed)
           res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       };
-      res
-        .status(200)
-        .set({
-          "Content-Type": "text/event-stream; charset=utf-8",
-          "Cache-Control": "no-cache, no-transform",
-          "X-Accel-Buffering": "no",
-          Connection: "keep-alive",
-        });
+      res.status(200).set({
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        Connection: "keep-alive",
+      });
       res.flushHeaders();
       send("start", {
         requestId,
@@ -932,20 +950,18 @@ export function createApp(options = {}) {
   app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
     const status = err.status || (err.type === "entity.too.large" ? 413 : 500);
-    res
-      .status(status)
-      .json({
-        error: err.publicError
-          ? err.message
-          : status === 413
-            ? "请求内容过大，请分章处理"
-            : status === 400
-              ? "请求内容格式不正确"
-              : status === 415
-                ? "请使用未压缩的JSON请求"
-                : "服务暂时不可用，请稍后重试",
-        ...(err.chapter ? { chapter: err.chapter } : {}),
-      });
+    res.status(status).json({
+      error: err.publicError
+        ? err.message
+        : status === 413
+          ? "请求内容过大，请分章处理"
+          : status === 400
+            ? "请求内容格式不正确"
+            : status === 415
+              ? "请使用未压缩的JSON请求"
+              : "服务暂时不可用，请稍后重试",
+      ...(err.chapter ? { chapter: err.chapter } : {}),
+    });
   });
   const staticRoot = options.staticRoot || resolve("dist/client");
   if (existsSync(staticRoot)) {

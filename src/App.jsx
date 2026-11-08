@@ -18,7 +18,21 @@ import {
   ArrowCounterClockwise,
 } from "@phosphor-icons/react";
 import { api, generate, setCsrf } from "./api";
-import { demoData } from "./demo";
+import { GuestWorkspace, readLocalDraft } from "./GuestWorkspace";
+const emptyData = {
+  projects: [],
+  chapters: [],
+  conversations: [],
+  messages: [],
+  settings: {},
+};
+const emptyEditor = {
+  id: "",
+  title: "",
+  content: "",
+  revision: 0,
+  dirty: false,
+};
 import "@fontsource/noto-serif-sc/400.css";
 import "@fontsource/noto-serif-sc/500.css";
 const modeNames = {
@@ -89,16 +103,16 @@ function AutoText({ value, ...props }) {
 }
 
 export function App() {
-  const [data, setData] = useState(demoData),
+  const [data, setData] = useState(emptyData),
     [user, setUser] = useState(null),
     [ready, setReady] = useState(false),
     [model, setModel] = useState(null),
     [online, setOnline] = useState(true);
-  const [projectId, setProjectId] = useState("demo-book"),
-    [chapterId, setChapterId] = useState("demo-chapter"),
-    [threadId, setThreadId] = useState("demo-thread");
+  const [projectId, setProjectId] = useState(""),
+    [chapterId, setChapterId] = useState(""),
+    [threadId, setThreadId] = useState("");
   const [editor, setEditor] = useState({
-      ...demoData.chapters[0],
+      ...emptyEditor,
       dirty: false,
     }),
     editorRef = useRef(editor),
@@ -115,10 +129,10 @@ export function App() {
   const [prompt, setPrompt] = useState(""),
     [busy, setBusy] = useState(false),
     [stream, setStream] = useState(""),
-    [previewId, setPreviewId] = useState("demo-preview"),
+    [previewId, setPreviewId] = useState(null),
     [parentId, setParentId] = useState(null),
     abortRef = useRef(null);
-  const [referenceIds, setReferenceIds] = useState(["demo-chapter"]),
+  const [referenceIds, setReferenceIds] = useState([]),
     [useSettings, setUseSettings] = useState(true),
     [history, setHistory] = useState([]),
     [logs, setLogs] = useState([]),
@@ -129,9 +143,20 @@ export function App() {
   const [createType, setCreateType] = useState("project"),
     [newTitle, setNewTitle] = useState(""),
     [metadata, setMetadata] = useState({}),
-    [settings, setSettings] = useState(demoData.settings);
+    [settings, setSettings] = useState({});
+  const [firstChapterTitle, setFirstChapterTitle] = useState("第一章");
+  const [includeLocalDraft, setIncludeLocalDraft] = useState(false);
+  const [hideLocalOffer, setHideLocalOffer] = useState(false);
+  const [localDraft, setLocalDraft] = useState(readLocalDraft);
+  const [localDraftUnsaved, setLocalDraftUnsaved] = useState(false);
+  const localDraftRisk = useRef(false);
+  function trackLocalPersistence(saved) {
+    setLocalDraftUnsaved(!saved);
+    localDraftRisk.current = !saved;
+  }
+  const hasLocalDraft = Boolean(localDraft.title || localDraft.content);
   const mounted = useRef(true);
-  const isDemo = !user,
+  const isGuest = !user,
     project = data.projects.find((p) => p.id === projectId),
     chapters = data.chapters
       .filter((c) => c.projectId === projectId)
@@ -186,9 +211,9 @@ export function App() {
       .then(async (s) => {
         if (!mounted.current) return;
         setCsrf(s.csrfToken);
-        setUser(s.user);
         setModel(s.modelCapabilities);
         if (s.user) await load();
+        setUser(s.user);
       })
       .catch(() => setOnline(false))
       .finally(() => {
@@ -201,7 +226,7 @@ export function App() {
   }, []);
   useEffect(() => {
     const h = (e) => {
-      if (editorRef.current.dirty) {
+      if (editorRef.current.dirty || localDraftRisk.current) {
         e.preventDefault();
         e.returnValue = "";
       }
@@ -212,7 +237,7 @@ export function App() {
   useEffect(() => {
     if (
       !editor.dirty ||
-      isDemo ||
+      isGuest ||
       ["conflict", "error"].includes(saveStatus.current)
     )
       return;
@@ -239,7 +264,7 @@ export function App() {
     return () => window.removeEventListener("keydown", fn);
   });
   async function save() {
-    if (isDemo || !editorRef.current.id || !editorRef.current.dirty)
+    if (isGuest || !editorRef.current.id || !editorRef.current.dirty)
       return true;
     if (saveLock.current) {
       const ok = await saveLock.current;
@@ -298,7 +323,7 @@ export function App() {
       if (!(await save())) return;
       let target = c;
       if (c?.id === editorRef.current.id) target = { ...editorRef.current };
-      else if (!isDemo && c) {
+      else if (!isGuest && c) {
         const fresh = await api("/bootstrap");
         setData(fresh);
         target = fresh.chapters.find((x) => x.id === c.id);
@@ -327,7 +352,7 @@ export function App() {
     }
   }
   function requireUser() {
-    if (isDemo) {
+    if (isGuest) {
       setPanel("login");
       return false;
     }
@@ -343,9 +368,9 @@ export function App() {
         body: { username, password },
       });
       setCsrf(s.csrfToken);
-      setUser(s.user);
       setPassword("");
       await load();
+      setUser(s.user);
       setPanel(null);
       setOnline(true);
     } catch (e) {
@@ -366,13 +391,13 @@ export function App() {
       await api("/logout", { method: "POST", body: {} });
       setCsrf("");
       setUser(null);
-      setData(demoData);
-      setProjectId("demo-book");
-      setChapterId("demo-chapter");
-      setThreadId("demo-thread");
-      updateEditor({ ...demoData.chapters[0], dirty: false });
-      setPreviewId("demo-preview");
-      setReferenceIds(["demo-chapter"]);
+      setData(emptyData);
+      setProjectId("");
+      setChapterId("");
+      setThreadId("");
+      updateEditor({ ...emptyEditor, dirty: false });
+      setPreviewId(null);
+      setReferenceIds([]);
       setPanel(null);
       setParentId(null);
     } catch (e) {
@@ -570,10 +595,21 @@ export function App() {
       if (createType === "project") {
         const r = await api("/projects", {
           method: "POST",
-          body: { title: newTitle.trim(), synopsis: "", genre: "长篇小说" },
+          body: {
+            title: newTitle.trim(),
+            synopsis: "",
+            genre: "长篇小说",
+            createFirstChapter: true,
+            firstChapterTitle: firstChapterTitle.trim() || "第一章",
+            firstChapterContent: includeLocalDraft ? localDraft.content : "",
+          },
         });
         const p = r.project || r;
         await load({ preferred: p.id });
+        if (includeLocalDraft) {
+          setHideLocalOffer(true);
+          localDraftRisk.current = false;
+        }
       } else if (createType === "chapter") {
         const r = await api("/chapters", {
           method: "POST",
@@ -605,14 +641,17 @@ export function App() {
       setMutating(false);
     }
   }
-  function startCreate(type) {
+  function startCreate(type, importLocal = false) {
     if (!requireUser()) return;
     if (busy) {
       inform("请先停止当前生成。");
       return;
     }
     setCreateType(type);
+    setIncludeLocalDraft(importLocal);
+    setFirstChapterTitle(importLocal ? localDraft.title || "第一章" : "第一章");
     setNewTitle("");
+    setError("");
     setPanel("create");
   }
   async function saveMetadata(e) {
@@ -655,9 +694,71 @@ export function App() {
       (n, c) => n + count(c.id === chapterId ? editor.content : c.content),
       0,
     );
+  const loginDialog = panel === "login" && (
+    <Dialog title="登录你的书房" onClose={() => setPanel(null)}>
+      <div className="login-intro">
+        <img src={stamp} alt="文行天下" />
+        <p>留一盏灯，接着写。</p>
+        <span>登录后保存作品，与文行一起推敲下一段故事。</span>
+      </div>
+      <form onSubmit={login} className="stack">
+        <label>
+          账号
+          <input
+            autoComplete="username"
+            autoFocus
+            required
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+          />
+        </label>
+        <label>
+          密码
+          <input
+            type="password"
+            autoComplete="current-password"
+            required
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </label>
+        <button className="primary" disabled={loginBusy}>
+          {loginBusy ? "正在开门…" : "进入书房"}
+        </button>
+        {error && (
+          <p className="inline-error" role="alert">
+            {error}
+          </p>
+        )}
+        <p className="fine-print">
+          账号由站点管理员创建，暂不开放注册。没有账号也可以先在本机试写。
+        </p>
+      </form>
+    </Dialog>
+  );
+  if (!user)
+    return (
+      <GuestWorkspace
+        unsaved={localDraftUnsaved}
+        onPersistence={trackLocalPersistence}
+        draft={localDraft}
+        onDraftChange={(draft) => {
+          setLocalDraft(draft);
+          setHideLocalOffer(false);
+        }}
+        ready={ready}
+        online={online}
+        onLogin={() => {
+          setError("");
+          setPanel("login");
+        }}
+      >
+        {loginDialog}
+      </GuestWorkspace>
+    );
   return (
     <div
-      className={`app ${focus ? "focus-mode" : "overview-mode"} ${mobileAssistant ? "assistant-open" : ""}`}
+      className={`app ${!chapterId ? "empty-workspace" : ""} ${focus ? "focus-mode" : "overview-mode"} ${mobileAssistant ? "assistant-open" : ""}`}
     >
       <header className="topbar">
         <a
@@ -685,11 +786,15 @@ export function App() {
             <List size={17} />
             <span>目录</span>
           </button>
-          <button aria-label="历史" onClick={openHistory}>
+          <button aria-label="历史" onClick={openHistory} disabled={!chapterId}>
             <ClockCounterClockwise size={17} />
             <span>历史</span>
           </button>
-          <button aria-label="导出" onClick={() => setPanel("export")}>
+          <button
+            aria-label="导出"
+            onClick={() => setPanel("export")}
+            disabled={!chapterId}
+          >
             <DownloadSimple size={17} />
             <span>导出</span>
           </button>
@@ -698,11 +803,11 @@ export function App() {
           </button>
           <button
             className="account"
-            onClick={() => (isDemo ? setPanel("login") : setPanel("account"))}
-            title={isDemo ? "登录书房" : user.displayName || user.username}
-            aria-label={isDemo ? "登录书房" : "账户与设置"}
+            onClick={() => (isGuest ? setPanel("login") : setPanel("account"))}
+            title={isGuest ? "登录书房" : user.displayName || user.username}
+            aria-label={isGuest ? "登录书房" : "账户与设置"}
           >
-            {isDemo ? <SignIn size={19} /> : <GearSix size={19} />}
+            {isGuest ? <SignIn size={19} /> : <GearSix size={19} />}
           </button>
         </nav>
       </header>
@@ -752,13 +857,32 @@ export function App() {
       )}
       <main className="writing-scroll" id="manuscript">
         <div className="manuscript">
-          {isDemo && (
-            <div className="demo-note">
+          {hasLocalDraft && !hideLocalOffer && (
+            <div className="local-draft-note">
               <span>
-                {online ? "示例书稿 · 只读体验" : "离线示例 · 书房服务暂不可用"}
+                {localDraftUnsaved
+                  ? "本页还有尚未保存的试写，关闭前请存为作品或导出。"
+                  : "此浏览器还有一份本地试写。"}
               </span>
-              <button onClick={() => setPanel("login")}>
-                登录，写自己的故事 <ArrowRight size={13} />
+              <button
+                onClick={() =>
+                  download(
+                    `${localDraft.title || "我的试写"}.txt`,
+                    localDraft.title + "\n\n" + localDraft.content,
+                  )
+                }
+              >
+                导出试写
+              </button>
+              <button onClick={() => startCreate("project", true)}>
+                存为新作品 <ArrowRight size={14} />
+              </button>
+              <button
+                className="icon"
+                aria-label="暂不导入试写"
+                onClick={() => setHideLocalOffer(true)}
+              >
+                <X size={16} />
               </button>
             </div>
           )}
@@ -769,7 +893,7 @@ export function App() {
                 className="chapter-title"
                 aria-label="章节标题"
                 value={editor.title}
-                readOnly={isDemo || busy || mutating}
+                readOnly={busy || mutating}
                 maxLength={120}
                 onChange={(e) => {
                   if (operationRef.current) return;
@@ -786,7 +910,7 @@ export function App() {
                 className="prose editor"
                 aria-label="章节正文"
                 value={editor.content}
-                readOnly={isDemo || busy || mutating}
+                readOnly={busy || mutating}
                 spellCheck={false}
                 placeholder="故事从这里开始。"
                 onChange={(e) => {
@@ -890,17 +1014,15 @@ export function App() {
                       : ""
                   }
                 >
-                  {isDemo
-                    ? "示例书稿"
-                    : saveState === "saving"
-                      ? "保存中…"
-                      : saveState === "saved"
-                        ? "已保存"
-                        : saveState === "unsaved"
-                          ? "等待保存…"
-                          : saveState === "conflict"
-                            ? "版本冲突 · 本地稿已保留"
-                            : "保存失败 · 请重试"}
+                  {saveState === "saving"
+                    ? "保存中…"
+                    : saveState === "saved"
+                      ? "已保存"
+                      : saveState === "unsaved"
+                        ? "等待保存…"
+                        : saveState === "conflict"
+                          ? "版本冲突 · 本地稿已保留"
+                          : "保存失败 · 请重试"}
                 </span>
                 <span>
                   字数：{count(editor.content).toLocaleString("zh-CN")}
@@ -919,9 +1041,9 @@ export function App() {
             </>
           ) : (
             <div className="empty-manuscript">
-              <p className="eyebrow">下一卷，待你落笔</p>
+              <p className="eyebrow">你的书房，准备好了</p>
               <h1>每个故事，都从一句话开始。</h1>
-              <p>先为作品取一个名字，再写下第一章。</p>
+              <p>为作品取个名字，即可开始第一章。人物与设定可以边写边补充。</p>
               <button
                 className="primary"
                 onClick={() => startCreate(projectId ? "chapter" : "project")}
@@ -929,7 +1051,9 @@ export function App() {
                 <Plus size={17} />
                 {projectId ? "新建第一章" : "创建作品"}
               </button>
-              <button onClick={() => setPanel("catalog")}>打开书架</button>
+              {data.projects.length > 0 && (
+                <button onClick={() => setPanel("catalog")}>打开书架</button>
+              )}
             </div>
           )}
         </div>
@@ -953,113 +1077,83 @@ export function App() {
           {notice}
         </div>
       )}
-      <button
-        className="mobile-assistant-toggle"
-        onClick={() => setMobileAssistant((v) => !v)}
-      >
-        {mobileAssistant ? "返回书稿" : "唤起文行助手"}{" "}
-        {mobileAssistant ? <ArrowLeft size={16} /> : <PencilSimple size={16} />}
-      </button>
-      <footer className="assistant-dock">
-        <div className="assistant-context">
-          <button className="assistant-mode" onClick={() => setPanel("mode")}>
-            文行 · {modeNames[mode]}助手
-          </button>
-          <span className="dock-rule" />
-          <div className="context-summary">
-            <span>
-              本次参考：
-              {referenceIds.length ? `${referenceIds.length}章` : "仅对话"}
-              {useSettings ? " · 人物设定" : ""}
-            </span>
-            <button onClick={() => setPanel("context")}>调整范围</button>
-          </div>
-        </div>
-        <form id="assistant-form" className="prompt-form" onSubmit={run}>
-          <div className="prompt-row">
-            <textarea
-              id="prompt"
-              aria-label="写作指令"
-              rows={1}
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="让来人的话留下破绽，暂不揭晓身份"
-              maxLength={12000}
-              disabled={busy}
-            />
-            {busy ? (
-              <button
-                type="button"
-                className="primary"
-                onClick={() => abortRef.current?.abort()}
-              >
-                <Stop size={16} />
-                停止
-              </button>
+      {chapterId && (
+        <>
+          <button
+            className="mobile-assistant-toggle"
+            onClick={() => setMobileAssistant((v) => !v)}
+          >
+            {mobileAssistant ? "返回书稿" : "唤起文行助手"}{" "}
+            {mobileAssistant ? (
+              <ArrowLeft size={16} />
             ) : (
-              <button className="primary" type="submit" disabled={!ready}>
-                提交
-              </button>
+              <PencilSimple size={16} />
             )}
-          </div>
-          <div className="prompt-hint">
-            <span>⌘ / Ctrl Enter 提交</span>
-            {parentId && (
+          </button>
+          <footer className="assistant-dock">
+            <div className="assistant-context">
               <button
-                type="button"
-                onClick={() => {
-                  setParentId(null);
-                  inform("已切回新的推演，不携带当前分支对话。");
-                }}
+                className="assistant-mode"
+                onClick={() => setPanel("mode")}
               >
-                已选历史分支 · 重置
+                文行 · {modeNames[mode]}助手
               </button>
-            )}
-          </div>
-        </form>
-      </footer>
-      {panel === "login" && (
-        <Dialog title="回到你的书房" onClose={() => setPanel(null)}>
-          <div className="login-intro">
-            <img src={stamp} alt="文行天下" />
-            <p>留一盏灯，接着写。</p>
-            <span>登录后保存作品，与文行一起推敲下一段故事。</span>
-          </div>
-          <form onSubmit={login} className="stack">
-            <label>
-              账号
-              <input
-                autoComplete="username"
-                autoFocus
-                required
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-              />
-            </label>
-            <label>
-              密码
-              <input
-                type="password"
-                autoComplete="current-password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </label>
-            <button className="primary" disabled={loginBusy}>
-              {loginBusy ? "正在开门…" : "进入书房"}
-            </button>
-            {error && (
-              <p className="inline-error" role="alert">
-                {error}
-              </p>
-            )}
-            <p className="fine-print">
-              这是私人书房。账号由站点所有者创建，未开放公众注册。
-            </p>
-          </form>
-        </Dialog>
+              <span className="dock-rule" />
+              <div className="context-summary">
+                <span>
+                  本次参考：
+                  {referenceIds.length ? `${referenceIds.length}章` : "仅对话"}
+                  {useSettings ? " · 人物设定" : ""}
+                </span>
+                <button onClick={() => setPanel("context")}>调整范围</button>
+              </div>
+            </div>
+            <form id="assistant-form" className="prompt-form" onSubmit={run}>
+              <div className="prompt-row">
+                <textarea
+                  id="prompt"
+                  aria-label="写作指令"
+                  rows={1}
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  placeholder="想往哪个方向写？告诉文行你的想法……"
+                  maxLength={12000}
+                  disabled={busy}
+                />
+                {busy ? (
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => abortRef.current?.abort()}
+                  >
+                    <Stop size={16} />
+                    停止
+                  </button>
+                ) : (
+                  <button className="primary" type="submit" disabled={!ready}>
+                    提交
+                  </button>
+                )}
+              </div>
+              <div className="prompt-hint">
+                <span>⌘ / Ctrl Enter 提交</span>
+                {parentId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setParentId(null);
+                      inform("已切回新的推演，不携带当前分支对话。");
+                    }}
+                  >
+                    已选历史分支 · 重置
+                  </button>
+                )}
+              </div>
+            </form>
+          </footer>
+        </>
       )}
+      {loginDialog}
       {panel === "catalog" && (
         <Dialog title="书架与目录" onClose={() => setPanel(null)} wide>
           <div className="catalog">
@@ -1368,10 +1462,6 @@ export function App() {
             </button>
             <button
               onClick={() => {
-                if (isDemo) {
-                  inform("示例无需备份。登录后可下载自己的完整作品。");
-                  return;
-                }
                 api("/bootstrap")
                   .then((d) => {
                     if (editorRef.current.dirty)
@@ -1421,11 +1511,45 @@ export function App() {
                 value={newTitle}
                 onChange={(e) => setNewTitle(e.target.value)}
                 placeholder={
-                  createType === "project" ? "未命名的远方" : "新的一章"
+                  createType === "project"
+                    ? "输入你自己的作品名"
+                    : "输入章节或思路名称"
                 }
               />
             </label>
-            <button className="primary">创建</button>
+            {createType === "project" && (
+              <>
+                <label>
+                  第一章标题
+                  <input
+                    value={firstChapterTitle}
+                    maxLength={120}
+                    onChange={(e) => setFirstChapterTitle(e.target.value)}
+                    placeholder="第一章"
+                  />
+                </label>
+                {hasLocalDraft && (
+                  <label className="check-row">
+                    <input
+                      type="checkbox"
+                      checked={includeLocalDraft}
+                      onChange={(e) => setIncludeLocalDraft(e.target.checked)}
+                    />
+                    把此浏览器的试写带入第一章
+                  </label>
+                )}
+                <p className="fine-print">
+                  创建后直接进入正文。试写仅在勾选后上传，原本的本机试写仍会保留。
+                </p>
+              </>
+            )}
+            <button className="primary" disabled={mutating}>
+              {mutating
+                ? "正在创建…"
+                : createType === "project"
+                  ? "创建并开始写作"
+                  : "创建"}
+            </button>
             {error && (
               <p className="inline-error" role="alert">
                 {error}

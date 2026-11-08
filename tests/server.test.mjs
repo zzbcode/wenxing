@@ -78,7 +78,7 @@ async function fixture(options = {}) {
     });
     return { status: r.status, data: await r.json() };
   }
-  async function book(user = alice, title = "雁回长安") {
+  async function book(user = alice, title = "测试作品") {
     const {
       data: { project },
     } = await request(user, "/projects", "POST", {
@@ -89,7 +89,7 @@ async function fixture(options = {}) {
       data: { chapter },
     } = await request(user, "/chapters", "POST", {
       projectId: project.id,
-      title: "雨入长安",
+      title: "测试第一章",
       content: "原稿。",
     });
     const {
@@ -145,6 +145,174 @@ async function fixture(options = {}) {
     },
   };
 }
+
+test("new account session and bootstrap never create demonstration works", async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await f.request(null, "/session")).status, 200);
+    const bootstrap = await f.request(f.alice, "/bootstrap");
+    assert.equal(bootstrap.status, 200);
+    for (const field of ["projects", "chapters", "conversations", "messages"])
+      assert.deepEqual(bootstrap.data[field], []);
+    assert.equal(
+      f.app.locals.db.prepare("SELECT count(*) AS n FROM projects").get().n,
+      0,
+    );
+    assert.equal(
+      f.app.locals.db.prepare("SELECT count(*) AS n FROM chapters").get().n,
+      0,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("one-step work creation preserves explicit draft bytes and owner isolation", async () => {
+  const f = await fixture();
+  try {
+    const content = "  合成试写。\n\n末行空格。  \n";
+    const created = await f.request(f.alice, "/projects", "POST", {
+      title: "我的合成作品",
+      createFirstChapter: true,
+      firstChapterTitle: "  自己的第一章  ",
+      firstChapterContent: content,
+      ownerId: "untrusted-owner-field",
+    });
+    assert.equal(created.status, 201);
+    const { project, chapter } = created.data;
+    assert.equal(chapter.projectId, project.id);
+    assert.equal(chapter.title, "自己的第一章");
+    assert.equal(chapter.content, content);
+    assert.equal(chapter.revision, 1);
+    assert.equal(chapter.sortOrder, 1);
+    assert.notEqual(project.ownerId, "untrusted-owner-field");
+    const mine = (await f.request(f.alice, "/bootstrap")).data;
+    assert.equal(mine.projects.length, 1);
+    assert.equal(mine.chapters.length, 1);
+    assert.equal(mine.chapters[0].content, content);
+    const other = (await f.request(f.bob, "/bootstrap")).data;
+    assert.deepEqual(other.projects, []);
+    assert.deepEqual(other.chapters, []);
+    assert.equal(
+      (
+        await f.request(f.bob, `/chapters/${chapter.id}`, "PATCH", {
+          expectedRevision: 1,
+          content: "foreign edit",
+        })
+      ).status,
+      404,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("first chapter is opt-in, starts blank by default and accepts the existing generation workflow", async () => {
+  const f = await fixture();
+  try {
+    const legacy = await f.request(f.alice, "/projects", "POST", {
+      title: "旧接口只建作品",
+      firstChapterContent: "must not be silently imported",
+    });
+    assert.equal(legacy.status, 201);
+    assert.equal(legacy.data.chapter, undefined);
+    assert.equal(
+      (await f.request(f.alice, "/bootstrap")).data.chapters.length,
+      0,
+    );
+    const created = await f.request(f.alice, "/projects", "POST", {
+      title: "空白新作",
+      createFirstChapter: true,
+      firstChapterTitle: "  ",
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.data.chapter.content, "");
+    assert.equal(created.data.chapter.title, "第一章");
+    const { project, chapter } = created.data;
+    const conversation = (
+      await f.request(f.alice, "/conversations", "POST", {
+        projectId: project.id,
+      })
+    ).data.conversation;
+    const generated = await f.chat(f.alice, { project, chapter, conversation });
+    assert.equal(generated.status, 200);
+    const message = generated.events.find((item) => item.event === "done").data
+      .assistantMessage;
+    assert.equal(
+      (await f.request(f.alice, "/bootstrap")).data.chapters[0].content,
+      "",
+    );
+    const adopted = await f.request(f.alice, "/chapters/append", "POST", {
+      chapterId: chapter.id,
+      messageId: message.id,
+      expectedRevision: 1,
+    });
+    assert.equal(adopted.status, 200);
+    assert.equal(adopted.data.chapter.revision, 2);
+    assert.match(adopted.data.chapter.content, /脚步/);
+  } finally {
+    await f.close();
+  }
+});
+
+test("invalid first chapter rejects creation before storing a partial work", async () => {
+  const f = await fixture();
+  try {
+    for (const firstChapterContent of [
+      42,
+      false,
+      {},
+      [],
+      "字".repeat(2000001),
+    ]) {
+      const response = await f.request(f.alice, "/projects", "POST", {
+        title: "不能留下半成品",
+        createFirstChapter: true,
+        firstChapterContent,
+      });
+      assert.equal(
+        response.status,
+        typeof firstChapterContent === "string" ? 413 : 400,
+      );
+      assert.equal(
+        f.app.locals.db.prepare("SELECT count(*) AS n FROM projects").get().n,
+        0,
+      );
+      assert.equal(
+        f.app.locals.db.prepare("SELECT count(*) AS n FROM chapters").get().n,
+        0,
+      );
+    }
+  } finally {
+    await f.close();
+  }
+});
+
+test("chapter insertion failure atomically rolls back its newly created work", async () => {
+  const f = await fixture();
+  try {
+    f.app.locals.db.exec(
+      "CREATE TRIGGER synthetic_chapter_failure BEFORE INSERT ON chapters BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END",
+    );
+    const response = await f.request(f.alice, "/projects", "POST", {
+      title: "原子创建检查",
+      createFirstChapter: true,
+      firstChapterContent: "合成内容",
+    });
+    assert.equal(response.status, 500);
+    assert.ok(!JSON.stringify(response.data).includes("synthetic failure"));
+    assert.equal(
+      f.app.locals.db.prepare("SELECT count(*) AS n FROM projects").get().n,
+      0,
+    );
+    assert.equal(
+      f.app.locals.db.prepare("SELECT count(*) AS n FROM chapters").get().n,
+      0,
+    );
+  } finally {
+    await f.close();
+  }
+});
 
 test("authentication, CSRF, session secrecy and origin protection", async () => {
   const f = await fixture();
