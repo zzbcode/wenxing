@@ -64,6 +64,9 @@ function Dialog({ title, children, onClose, wide = false }) {
   useEffect(() => {
     const el = ref.current;
     el.showModal();
+    el.querySelector(
+      "input:not([type=checkbox]):not([disabled]), textarea",
+    )?.focus();
     return () => {
       if (el.open) el.close();
     };
@@ -1503,7 +1506,7 @@ export function App() {
         >
           <form className="stack" onSubmit={create}>
             <label>
-              名称
+              {createType === "project" ? "作品名" : "名称"}
               <input
                 autoFocus
                 required
@@ -1539,7 +1542,9 @@ export function App() {
                   </label>
                 )}
                 <p className="fine-print">
-                  创建后直接进入正文。试写仅在勾选后上传，原本的本机试写仍会保留。
+                  {hasLocalDraft
+                    ? "创建后直接进入正文。试写仅在勾选后上传，原本的本机试写仍会保留。"
+                    : "创建后直接进入第一章。人物与设定可以边写边补充。"}
                 </p>
               </>
             )}
